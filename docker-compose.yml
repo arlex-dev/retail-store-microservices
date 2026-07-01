@@ -1,0 +1,190 @@
+services:
+
+  # ─── BACKING SERVICES ───────────────────────────────────────────
+
+  catalog-db:
+    image: mariadb:10.9
+    container_name: s12-project01-catalog-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: sampledb
+      MYSQL_USER: catalog_user
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - catalog-db-data:/var/lib/mysql
+    restart: always
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  orders-db:
+    image: mariadb:10.9
+    container_name: s12-project01-orders-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: orders
+      MYSQL_USER: orders_user
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - orders-db-data:/var/lib/mysql
+    restart: always
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  carts-db:
+    image: amazon/dynamodb-local:1.20.0
+    container_name: s12-project01-carts-db
+    restart: always
+
+  checkout-redis:
+    image: redis:6-alpine
+    container_name: s12-project01-checkout-redis
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: s12-project01-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    restart: always
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  # ─── APPLICATION SERVICES ───────────────────────────────────────
+
+  assets:
+    build:
+      context: src/assets
+      dockerfile: Dockerfile
+    image: retail-store-assets:local
+    container_name: s12-project01-assets
+    restart: always
+
+  catalog:
+    build:
+      context: src/catalog
+      dockerfile: ../../images/go/Dockerfile
+      args:
+        MAIN_PATH: main.go
+    image: retail-store-catalog:local
+    container_name: s12-project01-catalog
+    environment:
+      GIN_MODE: release
+      DB_ENDPOINT: catalog-db:3306
+      DB_NAME: sampledb
+      DB_USER: catalog_user
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_MIGRATE: "true"
+    restart: always
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+
+  carts:
+    build:
+      context: src/cart
+      dockerfile: ../../images/java17/Dockerfile
+      args:
+        JAR_PATH: target/carts-0.0.1-SNAPSHOT.jar
+    image: retail-store-carts:local
+    container_name: s12-project01-carts
+    environment:
+      JAVA_OPTS: "-XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom"
+      SERVER_TOMCAT_ACCESSLOG_ENABLED: "true"
+      SPRING_PROFILES_ACTIVE: dynamodb
+      CARTS_DYNAMODB_ENDPOINT: http://carts-db:8000
+      CARTS_DYNAMODB_CREATETABLE: "true"
+      AWS_ACCESS_KEY_ID: key
+      AWS_SECRET_ACCESS_KEY: dummy
+    restart: always
+    depends_on:
+      - carts-db
+
+  orders:
+    build:
+      context: src/orders
+      dockerfile: ../../images/java17/Dockerfile
+      args:
+        JAR_PATH: target/orders-0.0.1-SNAPSHOT.jar
+    image: retail-store-orders:local
+    container_name: s12-project01-orders
+    environment:
+      JAVA_OPTS: "-XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom"
+      SERVER_TOMCAT_ACCESSLOG_ENABLED: "true"
+      SPRING_PROFILES_ACTIVE: mysql,rabbitmq
+      SPRING_DATASOURCE_WRITER_URL: jdbc:mariadb://orders-db:3306/orders
+      SPRING_DATASOURCE_WRITER_USERNAME: orders_user
+      SPRING_DATASOURCE_WRITER_PASSWORD: ${MYSQL_PASSWORD}
+      SPRING_DATASOURCE_READER_URL: jdbc:mariadb://orders-db:3306/orders
+      SPRING_DATASOURCE_READER_USERNAME: orders_user
+      SPRING_DATASOURCE_READER_PASSWORD: ${MYSQL_PASSWORD}
+      SPRING_RABBITMQ_HOST: rabbitmq
+    restart: always
+    depends_on:
+      orders-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  checkout:
+    build:
+      context: src/checkout
+      dockerfile: ../../images/nodejs/Dockerfile
+    image: retail-store-checkout:local
+    container_name: s12-project01-checkout
+    environment:
+      REDIS_URL: redis://checkout-redis:6379
+      ENDPOINTS_ORDERS: http://orders:8080
+    restart: always
+    depends_on:
+      - checkout-redis
+      - orders
+
+  ui:
+    build:
+      context: src/ui
+      dockerfile: ../../images/java17/Dockerfile
+      args:
+        JAR_PATH: target/ui-0.0.1-SNAPSHOT.jar
+    image: retail-store-ui:local
+    container_name: s12-project01-ui
+    ports:
+      - "8888:8080"
+    environment:
+      JAVA_OPTS: "-XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom"
+      SERVER_TOMCAT_ACCESSLOG_ENABLED: "true"
+      ENDPOINTS_CATALOG: http://catalog:8080
+      ENDPOINTS_CARTS: http://carts:8080
+      ENDPOINTS_ORDERS: http://orders:8080
+      ENDPOINTS_CHECKOUT: http://checkout:8080
+      ENDPOINTS_ASSETS: http://assets:8080
+    restart: always
+    depends_on:
+      - catalog
+      - carts
+      - orders
+      - checkout
+      - assets
+
+# ─── VOLUMES ──────────────────────────────────────────────────────
+
+volumes:
+  catalog-db-data:
+  orders-db-data:
